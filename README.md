@@ -1,8 +1,18 @@
+# Mouse-Driven Vertical Scrolling Feature Preview
+
+<video src="https://github.com/user-attachments/assets/717ff219-db08-4124-a6b3-18e9e04ef217" controls="controls" style="width: 100%"></video>
+
+This fork of Ghostty introduces a mouse-driven vertical scrolling feature.
+
+**Note on this implementation:** For this proof-of-concept, the feature is hardcoded to the middle mouse button. The ideal implementation would make this a fully configurable mouse action in Ghostty's settings.
+
+---
+
 <!-- LOGO -->
 <h1>
 <p align="center">
   <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Logo" width="128">
-  <br>Ghostty
+  <br>Ghostty (Original README)
 </h1>
   <p align="center">
     Fast, native, feature-rich terminal emulator pushing modern features.
