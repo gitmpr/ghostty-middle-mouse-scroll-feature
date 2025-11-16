@@ -663,6 +663,11 @@ pub const Surface = extern struct {
         /// True when we have a precision scroll in progress
         precision_scroll: bool = false,
 
+        /// Middle-mouse scrolling state
+        middle_mouse_scrolling: bool = false,
+        middle_mouse_initial_y: f64 = 0,
+        middle_mouse_initial_scroll: f64 = 0,
+
         /// True when the child has exited.
         child_exited: bool = false,
 
@@ -2797,7 +2802,16 @@ pub const Surface = extern struct {
             return;
         }
 
-        if (button == .middle and !priv.gtk_enable_primary_paste) {
+        // Middle-mouse scrolling: store initial positions
+        if (button == .middle) {
+            priv.middle_mouse_scrolling = true;
+            priv.middle_mouse_initial_y = y;
+
+            const vadj = self.getVAdjustment();
+            if (vadj) |adj| {
+                priv.middle_mouse_initial_scroll = adj.getValue();
+            }
+
             return;
         }
 
@@ -2857,7 +2871,9 @@ pub const Surface = extern struct {
             return;
         }
 
-        if (button == .middle and !priv.gtk_enable_primary_paste) {
+        // Middle-mouse scrolling: deactivate on release
+        if (button == .middle) {
+            priv.middle_mouse_scrolling = false;
             return;
         }
 
@@ -2910,6 +2926,35 @@ pub const Surface = extern struct {
         const is_cursor_still = @abs(priv.cursor_pos.x - pos.x) < 1 and
             @abs(priv.cursor_pos.y - pos.y) < 1;
         if (is_cursor_still) return;
+
+        // Middle-mouse scrolling: calculate scroll position with dynamic sensitivity
+        if (priv.middle_mouse_scrolling) {
+            const vadj = self.getVAdjustment();
+            if (vadj) |adj| {
+                const widget = priv.gl_area.as(gtk.Widget);
+                const widget_height: f64 = @floatFromInt(widget.getAllocatedHeight());
+
+                if (widget_height > 0) {
+                    const upper = adj.getUpper();
+                    const page_size = adj.getPageSize();
+                    const scrollable_range = upper - page_size;
+                    const delta_y = y - priv.middle_mouse_initial_y;
+
+                    // Scale sensitivity with scrollback-to-window ratio
+                    const base_sensitivity = scrollable_range / widget_height;
+                    const ergonomic_multiplier: f64 = 1.5;
+                    const sensitivity = base_sensitivity * ergonomic_multiplier;
+
+                    const scroll_delta = delta_y * sensitivity;
+                    const new_value = priv.middle_mouse_initial_scroll + scroll_delta;
+                    const max_value = scrollable_range;
+                    const clamped_value = @max(0.0, @min(max_value, new_value));
+
+                    adj.setValue(clamped_value);
+                }
+            }
+            return;
+        }
 
         // If we don't have focus, and we want it, grab it.
         if (priv.config) |config| {
