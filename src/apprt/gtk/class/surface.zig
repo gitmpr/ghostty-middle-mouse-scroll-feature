@@ -8,6 +8,11 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
+// RAW C API for cursor testing
+const gtk_c = @cImport({
+    @cInclude("gtk/gtk.h");
+});
+
 const apprt = @import("../../../apprt.zig");
 const build_config = @import("../../../build_config.zig");
 const configpkg = @import("../../../config.zig");
@@ -667,6 +672,7 @@ pub const Surface = extern struct {
         middle_mouse_scrolling: bool = false,
         middle_mouse_initial_y: f64 = 0,
         middle_mouse_initial_scroll: f64 = 0,
+        middle_mouse_saved_shape: terminal.MouseShape = .default,
 
         /// True when the child has exited.
         child_exited: bool = false,
@@ -2173,8 +2179,27 @@ pub const Surface = extern struct {
 
     pub fn setMouseShape(self: *Self, shape: terminal.MouseShape) void {
         const priv = self.private();
+        const timestamp = std.time.milliTimestamp();
+        log.info("[T:{}] DEBUG-A1: setMouseShape called: old={} new={}", .{ timestamp, priv.mouse_shape, shape });
+        log.info("[T:{}] DEBUG-A2: middle_mouse_scrolling={}", .{ timestamp, priv.middle_mouse_scrolling });
+
+        // Don't allow cursor changes from terminal while middle-mouse scrolling
+        log.info("DEBUG-A3: Checking blocking condition", .{});
+        if (priv.middle_mouse_scrolling and shape != .all_scroll) {
+            log.info("DEBUG-A4: BLOCKED - middle-mouse scrolling active, keeping all_scroll cursor", .{});
+            log.info("setMouseShape: BLOCKED - middle-mouse scrolling active, keeping all_scroll cursor", .{});
+            return;
+        }
+        log.info("DEBUG-A5: NOT blocked, proceeding with cursor change", .{});
+
+        log.info("DEBUG-A6: Setting priv.mouse_shape to {}", .{shape});
         priv.mouse_shape = shape;
+        log.info("DEBUG-A7: priv.mouse_shape set, calling notifyByPspec", .{});
+        log.info("setMouseShape: calling notifyByPspec to trigger propMouseShape", .{});
         self.as(gobject.Object).notifyByPspec(properties.@"mouse-shape".impl.param_spec);
+        log.info("DEBUG-A8: notifyByPspec returned", .{});
+        log.info("setMouseShape: notifyByPspec completed", .{});
+        log.info("DEBUG-A9: setMouseShape exiting", .{});
     }
 
     pub fn getMouseHidden(self: *Self) bool {
@@ -2358,14 +2383,18 @@ pub const Surface = extern struct {
     ) callconv(.c) void {
         const priv = self.private();
 
+        log.info("propMouseHidden called: hidden={}", .{priv.mouse_hidden});
+
         // If we're hidden we set it to "none"
         if (priv.mouse_hidden) {
+            log.info("propMouseHidden: setting cursor to none", .{});
             self.as(gtk.Widget).setCursorFromName("none");
             return;
         }
 
         // If we're not hidden we just trigger the mouse shape
         // prop notification to handle setting the proper mouse shape.
+        log.info("propMouseHidden: calling propMouseShape", .{});
         self.propMouseShape(undefined, null);
     }
 
@@ -2378,7 +2407,10 @@ pub const Surface = extern struct {
 
         // If our mouse should be hidden currently then we don't
         // do anything.
-        if (priv.mouse_hidden) return;
+        if (priv.mouse_hidden) {
+            log.info("propMouseShape: mouse is hidden, not changing cursor", .{});
+            return;
+        }
 
         const name: [:0]const u8 = switch (priv.mouse_shape) {
             .default => "default",
@@ -2417,8 +2449,94 @@ pub const Surface = extern struct {
             .zoom_out => "zoom-out",
         };
 
-        // Set our new cursor.
-        self.as(gtk.Widget).setCursorFromName(name.ptr);
+        // Set DIFFERENT cursors on each widget to see which one displays!
+        log.info("DEBUG-1: propMouseShape: Shape is '{s}' (shape: {})", .{ name, priv.mouse_shape });
+        log.info("DEBUG-2: About to check if priv.mouse_shape == .all_scroll", .{});
+        log.info("DEBUG-3: priv.mouse_shape value: {}", .{priv.mouse_shape});
+        log.info("DEBUG-4: .all_scroll value: {}", .{terminal.MouseShape.all_scroll});
+
+        // Special handling for scroll mode cursor
+        if (priv.mouse_shape == .all_scroll) {
+            log.info("=== SCROLL MODE CURSOR TEST START ===", .{});
+
+            // APPROACH 1: Reset to null first
+            log.info("TEST-1: Resetting cursors to null", .{});
+            self.as(gtk.Widget).setCursor(null);
+            priv.gl_area.as(gtk.Widget).setCursor(null);
+            log.info("TEST-1: Cursors reset to null", .{});
+
+            // APPROACH 2: Set on Surface widget
+            log.info("TEST-2: Setting 'grab' on Surface widget", .{});
+            self.as(gtk.Widget).setCursorFromName("grab");
+            log.info("TEST-2: Surface cursor set", .{});
+
+            // APPROACH 3: Set on GL area widget
+            log.info("TEST-3: Setting 'grab' on GL area widget", .{});
+            priv.gl_area.as(gtk.Widget).setCursorFromName("grab");
+            log.info("TEST-3: GL area cursor set", .{});
+
+            // APPROACH 4: Set on Root widget
+            log.info("TEST-4: Attempting Root widget cursor", .{});
+            const widget = self.as(gtk.Widget);
+            if (widget.getRoot()) |root| {
+                log.info("TEST-4: Got root widget, setting cursor", .{});
+                root.as(gtk.Widget).setCursorFromName("grab");
+                log.info("TEST-4: Root widget cursor set", .{});
+            } else {
+                log.info("TEST-4: No root widget found", .{});
+            }
+
+            log.info("=== SCROLL MODE CURSOR TEST END ===", .{});
+        } else {
+            log.info("DEBUG-21: ENTERED else block - NOT all_scroll", .{});
+            // Normal mode - use the correct cursor
+            log.info("Normal mode: setting cursor '{s}' on Surface widget", .{name});
+            self.as(gtk.Widget).setCursorFromName(name.ptr);
+            log.info("DEBUG-22: Normal mode cursor set completed", .{});
+        }
+
+        // === CRITICAL: Set GdkSurface cursor for ALL mouse shape changes! ===
+        // Widget cursors don't propagate to GdkSurface automatically,
+        // so we must explicitly set it here for the cursor to be visible.
+        const timestamp = std.time.milliTimestamp();
+        const root = self.as(gtk.Widget).getRoot();
+        if (root) |r| {
+            const gtk_native = r.as(gtk.Native);
+            if (gtk_native.getSurface()) |surf| {
+                log.info("[T:{}] propMouseShape: Setting GdkSurface cursor to '{s}'", .{ timestamp, name });
+                const gdk_surf = @as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf)));
+                const gdk_cursor = gtk_c.gdk_cursor_new_from_name(name.ptr, null);
+                gtk_c.gdk_surface_set_cursor(gdk_surf, gdk_cursor);
+
+                // CRITICAL: Force display to update cursor immediately
+                const display = gtk_c.gdk_surface_get_display(gdk_surf);
+
+                // Try multiple approaches to force cursor update:
+                // 1. Get pointer device position (forces GTK to re-evaluate cursor)
+                const seat = gtk_c.gdk_display_get_default_seat(display);
+                if (seat) |s| {
+                    const device = gtk_c.gdk_seat_get_pointer(s);
+                    if (device) |d| {
+                        // Query pointer position to force cursor re-evaluation
+                        var x: f64 = 0;
+                        var y: f64 = 0;
+                        _ = gtk_c.gdk_surface_get_device_position(gdk_surf, d, &x, &y, null);
+                        log.info("[T:{}] Queried pointer position: x={d:.1} y={d:.1}", .{ timestamp, x, y });
+                    }
+                }
+
+                // 2. Sync display (wait for operations to complete)
+                gtk_c.gdk_display_sync(display);
+
+                // 3. Try to trigger a surface layout request
+                gtk_c.gdk_surface_request_layout(gdk_surf);
+                log.info("[T:{}] Requested surface layout", .{timestamp});
+
+                log.info("[T:{}] propMouseShape: GdkSurface cursor set + synced", .{timestamp});
+            }
+        }
+
+        log.info("DEBUG-23: propMouseShape function about to exit", .{});
     }
 
     fn vadjValueChanged(adj: *gtk.Adjustment, self: *Self) callconv(.c) void {
@@ -2804,6 +2922,44 @@ pub const Surface = extern struct {
 
         // Middle-mouse scrolling: store initial positions
         if (button == .middle) {
+            const timestamp = std.time.milliTimestamp();
+            log.info("[T:{}] Middle button pressed, activating scroll mode", .{timestamp});
+
+            // Save current cursor shape before changing
+            log.info("Setting cursor to all-scroll (saved shape: {})", .{priv.mouse_shape});
+            priv.middle_mouse_saved_shape = priv.mouse_shape;
+            self.setMouseShape(.all_scroll);
+
+            // FIX: Use device-specific cursor API for immediate update during button press
+            const root = self.as(gtk.Widget).getRoot();
+            if (root) |r| {
+                const gtk_native = r.as(gtk.Native);
+                if (gtk_native.getSurface()) |surf| {
+                    log.info("[T:{}] Button press: Setting cursor to all-scroll", .{timestamp});
+                    const gdk_surf = @as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf)));
+                    const gdk_cursor = gtk_c.gdk_cursor_new_from_name("all-scroll", null);
+
+                    // Get the pointer device and set cursor directly on it
+                    // This works immediately even during button press!
+                    const display = gtk_c.gdk_surface_get_display(gdk_surf);
+                    const seat = gtk_c.gdk_display_get_default_seat(display);
+                    if (seat) |s| {
+                        const pointer = gtk_c.gdk_seat_get_pointer(s);
+                        if (pointer) |p| {
+                            log.info("[T:{}] Setting device-specific cursor", .{timestamp});
+                            gtk_c.gdk_surface_set_device_cursor(gdk_surf, p, gdk_cursor);
+                        }
+                    }
+
+                    // Also set on surface for consistency
+                    gtk_c.gdk_surface_set_cursor(gdk_surf, gdk_cursor);
+
+                    if (gdk_cursor) |c| gtk_c.g_object_unref(c);
+                    log.info("[T:{}] Cursor set successfully", .{timestamp});
+                }
+            }
+
+            // NOW set the scrolling flag (after cursor is set)
             priv.middle_mouse_scrolling = true;
             priv.middle_mouse_initial_y = y;
 
@@ -2873,7 +3029,54 @@ pub const Surface = extern struct {
 
         // Middle-mouse scrolling: deactivate on release
         if (button == .middle) {
+            const timestamp = std.time.milliTimestamp();
+            log.info("[T:{}] Middle button released, deactivating scroll mode", .{timestamp});
             priv.middle_mouse_scrolling = false;
+
+            // Restore normal cursor
+            log.info("[T:{}] Restoring cursor to: {}", .{ timestamp, priv.middle_mouse_saved_shape });
+            self.setMouseShape(priv.middle_mouse_saved_shape);
+
+            // FIX: Clear cursor comprehensively from all widgets and surfaces
+            const root = self.as(gtk.Widget).getRoot();
+            if (root) |r| {
+                log.info("[T:{}] Button release: Clearing all cursors", .{timestamp});
+
+                // Clear cursor from window widget
+                const root_widget = @as(*gtk_c.GtkWidget, @ptrCast(@alignCast(r)));
+                gtk_c.gtk_widget_set_cursor_from_name(root_widget, null);
+
+                // Clear cursor from self widget
+                const self_widget = @as(*gtk_c.GtkWidget, @ptrCast(self.as(gtk.Widget)));
+                gtk_c.gtk_widget_set_cursor_from_name(self_widget, null);
+
+                // Clear cursor from GL area widget
+                const gl_widget = @as(*gtk_c.GtkWidget, @ptrCast(priv.gl_area.as(gtk.Widget)));
+                gtk_c.gtk_widget_set_cursor_from_name(gl_widget, null);
+
+                // Clear GdkSurface cursor with device-specific API
+                const gtk_native = r.as(gtk.Native);
+                if (gtk_native.getSurface()) |surf| {
+                    const gdk_surf = @as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf)));
+
+                    // Get the pointer device and clear cursor directly on it
+                    const display = gtk_c.gdk_surface_get_display(gdk_surf);
+                    const seat = gtk_c.gdk_display_get_default_seat(display);
+                    if (seat) |s| {
+                        const pointer = gtk_c.gdk_seat_get_pointer(s);
+                        if (pointer) |p| {
+                            log.info("[T:{}] Clearing device-specific cursor", .{timestamp});
+                            gtk_c.gdk_surface_set_device_cursor(gdk_surf, p, null);
+                        }
+                    }
+
+                    // Also clear on surface
+                    gtk_c.gdk_surface_set_cursor(gdk_surf, null);
+                }
+
+                log.info("[T:{}] All cursors cleared successfully", .{timestamp});
+            }
+
             return;
         }
 
@@ -2929,6 +3132,148 @@ pub const Surface = extern struct {
 
         // Middle-mouse scrolling: calculate scroll position with dynamic sensitivity
         if (priv.middle_mouse_scrolling) {
+            const motion_timestamp = std.time.milliTimestamp();
+            log.info("[T:{}] Motion during scroll: cursor shape is {}", .{ motion_timestamp, priv.mouse_shape });
+
+            // === ULTRA-COMPREHENSIVE C-API TEST WITH GL AREA ===
+            log.info("[T:{}] === ULTRA-C-API-TEST START ===", .{motion_timestamp});
+
+            const surface_widget = self.as(gtk.Widget);
+            const gl_widget = priv.gl_area.as(gtk.Widget);
+
+            log.info("UC-1: Surface widget ptr: {*}", .{surface_widget});
+            log.info("UC-2: GL area widget ptr: {*}", .{gl_widget});
+
+            // Get widget types
+            const surface_type = gtk_c.G_OBJECT_TYPE_NAME(@as(*gtk_c.GtkWidget, @ptrCast(surface_widget)));
+            const gl_type = gtk_c.G_OBJECT_TYPE_NAME(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+            log.info("UC-3: Surface type: {s}, GL type: {s}", .{ surface_type, gl_type });
+
+            // Get root
+            const root_c = gtk_c.gtk_widget_get_root(@as(*gtk_c.GtkWidget, @ptrCast(surface_widget)));
+            log.info("UC-4: Root widget ptr: {*}", .{root_c});
+
+            if (root_c != null) {
+                const root_widget = @as(*gtk_c.GtkWidget, @ptrCast(@alignCast(root_c)));
+                const root_type = gtk_c.G_OBJECT_TYPE_NAME(root_widget);
+                log.info("UC-5: Root type: {s}", .{root_type});
+
+                // === CHECK WIDGET STATE ===
+                const gl_realized = gtk_c.gtk_widget_get_realized(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+                const gl_mapped = gtk_c.gtk_widget_get_mapped(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+                const gl_visible = gtk_c.gtk_widget_get_visible(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+                const root_realized = gtk_c.gtk_widget_get_realized(root_widget);
+                const root_mapped = gtk_c.gtk_widget_get_mapped(root_widget);
+                log.info("UC-5a: GL area - realized:{} mapped:{} visible:{}", .{ gl_realized != 0, gl_mapped != 0, gl_visible != 0 });
+                log.info("UC-5b: Root - realized:{} mapped:{}", .{ root_realized != 0, root_mapped != 0 });
+
+                // Check root's GdkSurface (the actual Wayland/X11 surface)
+                const root_surface = gtk_c.gtk_native_get_surface(@as(*gtk_c.GtkNative, @ptrCast(@alignCast(root_widget))));
+                log.info("UC-5c: Root GdkSurface: {*}", .{root_surface});
+
+                // Get the cursor on the GdkSurface directly (this is what actually displays)
+                if (root_surface) |surf| {
+                    const surface_cursor = gtk_c.gdk_surface_get_cursor(@as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf))));
+                    log.info("UC-5d: GdkSurface cursor: {*}", .{surface_cursor});
+                    if (surface_cursor) |sc| {
+                        const surf_cursor_name = gtk_c.gdk_cursor_get_name(@as(*gtk_c.GdkCursor, @ptrCast(@alignCast(sc))));
+                        if (surf_cursor_name) |name| {
+                            log.info("UC-5e: GdkSurface cursor name: {s}", .{name});
+                        }
+                    }
+                }
+
+                // === CHECK CURSORS ON ALL WIDGETS BEFORE ===
+                const root_cursor_before = gtk_c.gtk_widget_get_cursor(root_widget);
+                const surface_cursor_before = gtk_c.gtk_widget_get_cursor(@as(*gtk_c.GtkWidget, @ptrCast(surface_widget)));
+                const gl_cursor_before = gtk_c.gtk_widget_get_cursor(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+
+                log.info("UC-6: BEFORE - Root cursor: {*}", .{root_cursor_before});
+                log.info("UC-7: BEFORE - Surface cursor: {*}", .{surface_cursor_before});
+                log.info("UC-8: BEFORE - GL area cursor: {*}", .{gl_cursor_before});
+
+                // === SET CURSORS USING C API (SAME AS WORKING TEST) ===
+                log.info("UC-9: Setting 'all-scroll' on Root using C API...", .{});
+                gtk_c.gtk_widget_set_cursor_from_name(root_widget, "all-scroll");
+
+                log.info("UC-10: Setting 'all-scroll' on Surface using C API...", .{});
+                gtk_c.gtk_widget_set_cursor_from_name(@as(*gtk_c.GtkWidget, @ptrCast(surface_widget)), "all-scroll");
+
+                log.info("UC-11: Setting 'all-scroll' on GL area using C API...", .{});
+                gtk_c.gtk_widget_set_cursor_from_name(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)), "all-scroll");
+
+                // === DISABLED: Don't set cursor on every motion event! ===
+                // We now set it ONCE in button press, not on every motion.
+                // Setting it here was creating new cursor objects on every motion,
+                // overriding our button press cursor.
+                // if (root_surface) |surf| {
+                //     log.info("UC-11a: Creating GdkCursor for GdkSurface...", .{});
+                //     const gdk_cursor = gtk_c.gdk_cursor_new_from_name("all-scroll", null);
+                //     log.info("UC-11b: Setting cursor directly on GdkSurface...", .{});
+                //     gtk_c.gdk_surface_set_cursor(@as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf))), gdk_cursor);
+                //     log.info("UC-11c: GdkSurface cursor set!", .{});
+                // }
+
+                log.info("UC-12: All cursors set via C API", .{});
+
+                // === CHECK CURSORS ON ALL WIDGETS AFTER ===
+                const root_cursor_after = gtk_c.gtk_widget_get_cursor(root_widget);
+                const surface_cursor_after = gtk_c.gtk_widget_get_cursor(@as(*gtk_c.GtkWidget, @ptrCast(surface_widget)));
+                const gl_cursor_after = gtk_c.gtk_widget_get_cursor(@as(*gtk_c.GtkWidget, @ptrCast(gl_widget)));
+
+                log.info("UC-13: AFTER - Root cursor: {*}", .{root_cursor_after});
+                log.info("UC-14: AFTER - Surface cursor: {*}", .{surface_cursor_after});
+                log.info("UC-15: AFTER - GL area cursor: {*}", .{gl_cursor_after});
+
+                // === COMPARE CHANGES ===
+                log.info("UC-16: Root changed? {} ({*} → {*})", .{ root_cursor_after != root_cursor_before, root_cursor_before, root_cursor_after });
+                log.info("UC-17: Surface changed? {} ({*} → {*})", .{ surface_cursor_after != surface_cursor_before, surface_cursor_before, surface_cursor_after });
+                log.info("UC-18: GL area changed? {} ({*} → {*})", .{ gl_cursor_after != gl_cursor_before, gl_cursor_before, gl_cursor_after });
+
+                // === GET CURSOR NAMES (if available) ===
+                if (gl_cursor_after) |gl_cur| {
+                    const gl_cur_name = gtk_c.gdk_cursor_get_name(@as(*gtk_c.GdkCursor, @ptrCast(@alignCast(gl_cur))));
+                    if (gl_cur_name) |name| {
+                        log.info("UC-19: GL area cursor name: {s}", .{name});
+                    } else {
+                        log.info("UC-19: GL area cursor name: (NULL)", .{});
+                    }
+                } else {
+                    log.info("UC-19: GL area cursor is NULL", .{});
+                }
+
+                if (root_cursor_after) |root_cur| {
+                    const root_cur_name = gtk_c.gdk_cursor_get_name(@as(*gtk_c.GdkCursor, @ptrCast(@alignCast(root_cur))));
+                    if (root_cur_name) |name| {
+                        log.info("UC-20: Root cursor name: {s}", .{name});
+                    } else {
+                        log.info("UC-20: Root cursor name: (NULL)", .{});
+                    }
+                } else {
+                    log.info("UC-20: Root cursor is NULL", .{});
+                }
+
+                // === CHECK GDKSURFACE CURSOR AFTER (THIS IS WHAT ACTUALLY DISPLAYS!) ===
+                if (root_surface) |surf| {
+                    const gdksurface_cursor_after = gtk_c.gdk_surface_get_cursor(@as(*gtk_c.GdkSurface, @ptrCast(@alignCast(surf))));
+                    log.info("UC-21: GdkSurface cursor AFTER: {*}", .{gdksurface_cursor_after});
+                    if (gdksurface_cursor_after) |sc| {
+                        const surf_cursor_name_after = gtk_c.gdk_cursor_get_name(@as(*gtk_c.GdkCursor, @ptrCast(@alignCast(sc))));
+                        if (surf_cursor_name_after) |name| {
+                            log.info("UC-22: GdkSurface cursor name AFTER: {s}", .{name});
+                        } else {
+                            log.info("UC-22: GdkSurface cursor name AFTER: (NULL)", .{});
+                        }
+                    } else {
+                        log.info("UC-22: GdkSurface has NULL cursor (will inherit from parent)", .{});
+                    }
+                }
+            } else {
+                log.info("UC-ERROR: gtk_widget_get_root returned null!", .{});
+            }
+
+            log.info("=== ULTRA-C-API-TEST END ===", .{});
+
             const vadj = self.getVAdjustment();
             if (vadj) |adj| {
                 const widget = priv.gl_area.as(gtk.Widget);
