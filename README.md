@@ -2,7 +2,7 @@
 
 <video src="https://github.com/user-attachments/assets/717ff219-db08-4124-a6b3-18e9e04ef217" controls="controls" style="width: 100%"></video>
 
-This fork of Ghostty introduces a mouse-driven vertical scrolling feature.
+This fork of Ghostty introduces a mouse-driven vertical scrolling [feature idea suggestion](https://github.com/ghostty-org/ghostty/discussions/9607).
 
 **Note on this implementation:** For this proof-of-concept, the feature is hardcoded to the middle mouse button. The ideal implementation would make this a fully configurable mouse action in Ghostty's settings.
 
