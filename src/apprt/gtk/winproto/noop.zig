@@ -35,6 +35,9 @@ pub const App = struct {
         return false;
     }
     pub fn initQuickTerminal(_: *App, _: *ApprtWindow) !void {}
+    pub fn quickTerminalInitialSize(_: *App, _: *ApprtWindow) ?struct { width: u32, height: u32 } {
+        return null;
+    }
 };
 
 pub const Window = struct {

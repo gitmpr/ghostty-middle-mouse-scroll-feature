@@ -2134,6 +2134,11 @@ const Action = struct {
             .app => return false,
             .surface => |core| {
                 const surface = core.rt_surface.surface;
+                if (ext.getAncestor(Window, surface.as(gtk.Widget))) |window| {
+                    if (window.isQuickTerminal()) {
+                        return true;
+                    }
+                }
                 surface.setDefaultSize(.{
                     .width = value.width,
                     .height = value.height,
@@ -2312,15 +2317,30 @@ const Action = struct {
             .title = overrides.title,
         });
 
-        // Estimate the initial window size before presenting so the window
-        // manager can position it correctly.
+        // Set the initial window size before presenting so the window manager
+        // can position it correctly.
         if (win.getActiveSurface()) |surface| {
-            surface.estimateInitialSize();
-            if (surface.getDefaultSize()) |size| {
-                win.as(gtk.Window).setDefaultSize(
-                    @intCast(size.width),
-                    @intCast(size.height),
-                );
+            if (win.isQuickTerminal()) {
+                // For quick terminal windows, derive the size from the target
+                // monitor geometry rather than font metrics. estimateInitialSize
+                // computes dimensions from window-width × window-height × cell
+                // size, which are far too small for a full-width overlay and
+                // cause a visible wrong-sized first frame before enteredMonitor
+                // fires and corrects the size.
+                if (self.winproto().quickTerminalInitialSize(win)) |size| {
+                    win.as(gtk.Window).setDefaultSize(
+                        @intCast(size.width),
+                        @intCast(size.height),
+                    );
+                }
+            } else {
+                surface.estimateInitialSize();
+                if (surface.getDefaultSize()) |size| {
+                    win.as(gtk.Window).setDefaultSize(
+                        @intCast(size.width),
+                        @intCast(size.height),
+                    );
+                }
             }
         }
 

@@ -78,6 +78,19 @@ pub const App = union(Protocol) {
             inline else => |*v| try v.initQuickTerminal(apprt_window),
         }
     }
+
+    /// Return the correct initial size for a quick terminal window based on
+    /// the configured monitor, so it can be applied before present().
+    /// Returns null when the size cannot be determined ahead of time (e.g.
+    /// quick-terminal-screen = mouse, or non-Wayland backend).
+    pub fn quickTerminalInitialSize(self: *App, apprt_window: *ApprtWindow) ?struct { width: u32, height: u32 } {
+        return switch (self.*) {
+            inline else => |*v| if (v.quickTerminalInitialSize(apprt_window)) |s|
+                .{ .width = s.width, .height = s.height }
+            else
+                null,
+        };
+    }
 };
 
 /// Per-Window state for the underlying windowing protocol.

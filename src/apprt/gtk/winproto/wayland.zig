@@ -86,6 +86,32 @@ pub const App = struct {
         defer if (monitor) |v| v.unref();
         layer_shell.setMonitor(window, monitor);
     }
+
+    /// Return the correct initial size for the quick terminal based on the
+    /// configured monitor geometry. Returns null when the target monitor cannot
+    /// be determined before present() (e.g. quick-terminal-screen = mouse), in
+    /// which case enteredMonitor will apply the correct size after the first frame.
+    pub fn quickTerminalInitialSize(self: *App, apprt_window: *ApprtWindow) ?struct { width: u32, height: u32 } {
+        const config = if (apprt_window.getConfig()) |v| v.get() else return null;
+
+        // For mouse mode the compositor decides which output to place the
+        // surface on; we cannot know the monitor before present().
+        const monitor = resolveQuickTerminalMonitor(self.globals, apprt_window) orelse return null;
+        defer monitor.unref();
+
+        var monitor_size: gdk.Rectangle = undefined;
+        monitor.getGeometry(&monitor_size);
+
+        const dims = config.@"quick-terminal-size".calculate(
+            config.@"quick-terminal-position",
+            .{
+                .width = @intCast(monitor_size.f_width),
+                .height = @intCast(monitor_size.f_height),
+            },
+        );
+
+        return .{ .width = dims.width, .height = dims.height };
+    }
 };
 
 /// Per-window (wl_surface) state for the Wayland protocol.
